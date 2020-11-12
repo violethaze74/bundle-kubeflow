@@ -149,9 +149,11 @@ def ck_info(controller):
     )
 
     dashboard = config['clusters'][0]['cluster']['server']
-    username = config['users'][0]['user']['username']
-    password = config['users'][0]['user']['password']
+    # username = config['users'][0]['user']['username']
+    # password = config['users'][0]['user']['password']
 
+    username = ''
+    password = ''
     print(
         textwrap.dedent(
             f"""
