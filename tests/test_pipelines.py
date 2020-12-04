@@ -63,7 +63,7 @@ def test_pipelines(name: str, params: list, fn: Callable):
 
     client = Client('127.0.0.1:8888')
     run = client.create_run_from_pipeline_func(
-        fn, arguments={p['name']: p['value'] for p in params}
+        fn, arguments={p['name']: p['value'] for p in params}, experiment_name='CI'
     )
     completed = client.wait_for_run_completion(run.run_id, timeout=1200)
     status = completed.to_dict()['run']['status']
