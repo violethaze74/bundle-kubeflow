@@ -1,0 +1,3 @@
+ops>=1.0.0
+file:///home/ubuntu/ops-interface-service-mesh#egg=interface-service-mesh
+ops_reactive_interface
