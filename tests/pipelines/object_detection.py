@@ -32,10 +32,13 @@ def load_task(
     load(images)
     load(annotations)
 
+    # Save some validation images to ensure that the model is getting served correctly
+    # Not used as part of a train/test/validation split
     with tarfile.open(mode='w:gz', fileobj=validation_images) as tar:
         for image in glob('/root/.keras/datasets/images/*.jpg')[:10]:
             tar.add(image, arcname=Path(image).name)
 
+    # Convert the JPG files into TFRecords
     subprocess.run(
         [
             'python',
@@ -49,13 +52,21 @@ def load_task(
         cwd='/models/research',
     )
 
+    # Store TFRecord files in `records` output file
     with tarfile.open(mode='w:gz', fileobj=records) as tar:
         for record in glob('/models/research/*.record-*'):
             tar.add(record, arcname=Path(record).name)
 
 
 @func_to_container_op
-def train_task(records: InputBinaryFile(str), pretrained: str, exported: OutputBinaryFile(str)):
+def train_task(
+    records: InputBinaryFile(str),
+    pretrained: str,
+    training_steps: int,
+    exported: OutputBinaryFile(str),
+):
+    """Train pet detector model."""
+
     from pathlib import Path
     from tensorflow.python.keras.utils import get_file
     import subprocess
@@ -67,22 +78,27 @@ def train_task(records: InputBinaryFile(str), pretrained: str, exported: OutputB
     def load(path):
         return get_file(Path(path).name, path, extract=True)
 
+    # Download pretrained model
     model_path = Path(load(pretrained))
     model_path = str(model_path.with_name(model_path.name.split('.')[0]))
     shutil.move(model_path, '/model')
 
+    # Extract TFRecords from previous step into /records
     with tarfile.open(mode='r:gz', fileobj=records) as tar:
         tar.extractall('/records')
 
+    # Set values in example config
     with open('/pipeline.config', 'w') as f:
         config = Path('samples/configs/faster_rcnn_resnet101_pets.config').read_text()
         config = re.sub(r'PATH_TO_BE_CONFIGURED\/model\.ckpt', '/model/model.ckpt', config)
         config = re.sub('PATH_TO_BE_CONFIGURED', '/records', config)
         f.write(config)
 
+    # Copy labels to TFRecords directory
     shutil.copy('data/pet_label_map.pbtxt', '/records/pet_label_map.pbtxt')
 
     print("Training model")
+    # Train model
     subprocess.check_call(
         [
             sys.executable,
@@ -96,6 +112,7 @@ def train_task(records: InputBinaryFile(str), pretrained: str, exported: OutputB
         ],
     )
 
+    # Export model
     subprocess.check_call(
         [
             sys.executable,
@@ -111,6 +128,7 @@ def train_task(records: InputBinaryFile(str), pretrained: str, exported: OutputB
         ],
     )
 
+    # Save exported model as step output
     with tarfile.open(mode='w:gz', fileobj=exported) as tar:
         tar.add('/exported', recursive=True)
 
@@ -143,15 +161,18 @@ def test_task(model: InputBinaryFile(str), validation_images: InputBinaryFile(st
     import time
     from matplotlib.pyplot import imread
 
+    # Extract trained model to path that sidecar can access
     with tarfile.open(model.name) as tar:
         tar.extractall(path="/")
     shutil.move('/exported', '/output/object_detection')
     # https://stackoverflow.com/a/45552938
     shutil.copytree('/output/object_detection/saved_model', '/output/object_detection/1')
 
+    # Extract validation images for testing model serving
     with tarfile.open(validation_images.name) as tar:
         tar.extractall(path="/images")
 
+    # Wait for sidecar to come up
     model_url = 'http://localhost:9001/v1/models/object_detection'
     for _ in range(60):
         try:
@@ -163,6 +184,7 @@ def test_task(model: InputBinaryFile(str), validation_images: InputBinaryFile(st
     else:
         raise Exception("Waited too long for sidecar to come up!")
 
+    # Ensure that the metadata about the model is correct
     response = requests.get(f'{model_url}/metadata')
     response.raise_for_status()
     assert response.json() == {
@@ -273,7 +295,8 @@ def test_task(model: InputBinaryFile(str), validation_images: InputBinaryFile(st
         },
     }
 
-    test_images = np.zeros((5, 100, 100, 3), dtype=np.uint8).tolist()
+    # Convert the images into a numpy array suitable for
+    test_images = np.zeros((10, 100, 100, 3), dtype=np.uint8).tolist()
     response = requests.post(f'{model_url}:predict', json={'instances': test_images})
     response.raise_for_status()
     shapes = {
@@ -313,13 +336,14 @@ def test_task(model: InputBinaryFile(str), validation_images: InputBinaryFile(st
     description='Continues training a pretrained pet detection model, then tests serving it.',
 )
 def object_detection_pipeline(
-    images='https://people.canonical.com/~knkski/images.tar.gz',
-    annotations='https://people.canonical.com/~knkski/annotations.tar.gz',
-    pretrained='https://people.canonical.com/~knkski/faster_rcnn_resnet101_coco_11_06_2017.tar.gz',
+    images: str = 'https://people.canonical.com/~knkski/images.tar.gz',
+    annotations: str = 'https://people.canonical.com/~knkski/annotations.tar.gz',
+    pretrained: str = 'https://people.canonical.com/~knkski/faster_rcnn_resnet101_coco_11_06_2017.tar.gz',
+    training_steps: int = 1,
 ):
     loaded = load_task(images, annotations)
     loaded.container.set_gpu_limit(1)
-    train = train_task(loaded.outputs['records'], pretrained)
+    train = train_task(loaded.outputs['records'], pretrained, training_steps)
     train.container.set_gpu_limit(1)
 
     test = test_task(train.outputs['exported'], loaded.outputs['validation_images'])
